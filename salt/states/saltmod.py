@@ -30,6 +30,7 @@ import logging
 # Import salt libs
 import salt.utils
 import salt._compat
+import salt.runner
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,8 @@ def state(
         fail_minions=None,
         allow_fail=0,
         concurrent=False,
-        timeout=None):
+        timeout=None,
+        allow_noreturn=False):
     '''
     Invoke a state run on a given target
 
@@ -101,6 +103,11 @@ def state(
         WARNING: This flag is potentially dangerous. It is designed
         for use when multiple state runs can safely be run at the same
         Do not use this flag for performance optimization.
+
+    allow_noreturn
+        Allow minions to not return any data
+        this is useful to guarantee that all the minion returned
+        mine should be configured with the test.ping function
     '''
     cmd_kw = {'arg': [], 'kwarg': {}, 'ret': ret, 'timeout': timeout}
 
@@ -169,7 +176,13 @@ def state(
     fail = set()
     failures = {}
     no_change = set()
+    no_return = None
 
+    if allow_noreturn is False:
+        runner = salt.runner.RunnerClient(__opts__)
+        no_return = set(runner.cmd('mine.get', [tgt, 'test.ping', cmd_kw['expr_form']]).keys())
+        #no_return = set(__salt__['mine.get'](tgt, 'test.ping', cmd_kw['expr_form']).keys())
+        log.debug('dicovered minions for execution {0}'.format(','.join(no_return)))
     if fail_minions is None:
         fail_minions = ()
     elif isinstance(fail_minions, salt._compat.string_types):
@@ -182,6 +195,11 @@ def state(
         fail_minions = ()
 
     for minion, mdata in cmd_ret.iteritems():
+        if allow_noreturn is False:
+            try:
+                no_return.remove(minion)
+            except KeyError:
+                log.warning('{0} was not discovered for execution but did return ...'.format(minion))
         if mdata['out'] != 'highstate':
             log.warning("Output from salt state not highstate")
         m_ret = mdata['ret']
@@ -222,6 +240,9 @@ def state(
                         ).splitlines()
                     )
             ret['comment'] += '\n'
+    if no_return:
+        ret['result'] = False
+        ret['comment'] += '\nNo return: {0}'.format(''.join(no_return))
     return ret
 
 
