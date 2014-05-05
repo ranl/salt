@@ -355,12 +355,12 @@ def installed(name,
         volumes = []
     if isinstance(environment, dict):
         for k in environment:
-            denvironment[u'%s' % k] = u'%s' % environment[k]
+            denvironment[unicode(k)] = unicode(environment[k])
     if isinstance(environment, list):
         for p in environment:
             if isinstance(p, dict):
                 for k in p:
-                    denvironment[u'%s' % k] = u'%s' % p[k]
+                    denvironment[unicode(k)] = unicode(p[k])
     for p in ports:
         if not isinstance(p, dict):
             dports[str(p)] = {}
@@ -370,7 +370,7 @@ def installed(name,
     for p in volumes:
         vals = []
         if not isinstance(p, dict):
-            vals.append('%s' % p)
+            vals.append('{0}'.format(p))
         else:
             for k in p:
                 vals.append('{0}:{1}'.format(k, p[k]))
@@ -459,8 +459,8 @@ def run(name,
         docked_onlyif=None,
         docked_unless=None,
         *args, **kwargs):
-    '''Run a command in a specific container
-
+    '''
+    Run a command in a specific container
 
     You can match by either name or hostname
 
@@ -487,9 +487,10 @@ def run(name,
 
     '''
     if hostname:
-        salt.utils.warn_until((0, 19),
-                              'The argument \'hostname\' argument'
-                              ' has been deprecated.')
+        salt.utils.warn_until(
+            'Helium',
+            'The \'hostname\' argument has been deprecated.'
+        )
     retcode = __salt__['docker.retcode']
     drun_all = __salt__['docker.run_all']
     valid = functools.partial(_valid, name=name)
@@ -539,14 +540,14 @@ def script(*args, **kw):
 
         Not yet implemented.
         Its implementation might be very similar from
-        :mod:`salt.states.dokcerio.run`
+        :mod:`salt.states.dockerio.run`
     '''
     raise NotImplementedError
 
 
 def running(name, container=None, port_bindings=None, binds=None,
             publish_all_ports=False, links=None, lxc_conf=None,
-            privileged=False):
+            privileged=False, dns=None, volumes_from=None):
     '''
     Ensure that a container is running. (`docker inspect`)
 
@@ -584,6 +585,34 @@ def running(name, container=None, port_bindings=None, binds=None,
                 "5000/tcp":
                     HostIp: ""
                     HostPort: "5000"
+    binds
+        List of volumes to mount
+
+        .. code-block:: yaml
+
+            - binds:
+                /home/user1:
+                    bind: /mnt/vol2
+                    ro: true
+                /var/www:
+                    bind: /mnt/vol1
+                    ro: false
+
+    dns
+        List of DNS servers.
+
+        .. code-block:: yaml
+
+            - dns:
+                - 127.0.0.1
+
+    volumes_from
+        List of container names to get volumes definition from
+
+        .. code-block:: yaml
+
+            - dns:
+                - name_other_container
     '''
     is_running = __salt__['docker.is_running'](container)
     if is_running:
@@ -593,7 +622,9 @@ def running(name, container=None, port_bindings=None, binds=None,
         started = __salt__['docker.start'](
             container, binds=binds, port_bindings=port_bindings,
             lxc_conf=lxc_conf, publish_all_ports=publish_all_ports,
-            links=links, privileged=privileged)
+            links=links, privileged=privileged,
+            dns=dns, volumes_from=volumes_from,
+        )
         is_running = __salt__['docker.is_running'](container)
         if is_running:
             return _valid(

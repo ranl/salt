@@ -19,8 +19,6 @@ from salt.exceptions import (
 
 log = logging.getLogger(__name__)
 
-# This is imported in salt.modules.pkg_resource._parse_pkg_meta. Don't change
-# it without considering its impact there.
 __QUERYFORMAT = '%{NAME}_|-%{VERSION}_|-%{RELEASE}_|-%{ARCH}_|-%{REPOID}'
 
 # These arches compiled from the rpmUtils.arch python module source
@@ -64,8 +62,6 @@ def __virtual__():
     return False
 
 
-# This is imported in salt.modules.pkg_resource._parse_pkg_meta. Don't change
-# it without considering its impact there.
 def _parse_pkginfo(line):
     '''
     A small helper to parse a repoquery; returns a namedtuple
@@ -485,8 +481,14 @@ def check_db(*names, **kwargs):
         ret.setdefault(name, {})['found'] = name in avail
         if not ret[name]['found']:
             repoquery_cmd = repoquery_base + ' {0}'.format(name)
-            provides = set(x.name for x in _repoquery_pkginfo(repoquery_cmd))
-            ret[name]['suggestions'] = sorted(provides)
+            provides = sorted(
+                set(x.name for x in _repoquery_pkginfo(repoquery_cmd))
+            )
+            if name in provides:
+                # Package was not in avail but was found by the repoquery_cmd
+                ret[name]['found'] = True
+            else:
+                ret[name]['suggestions'] = provides
     return ret
 
 

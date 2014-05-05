@@ -308,6 +308,34 @@ def set_mode(path, mode):
     return get_mode(path)
 
 
+def lchown(path, user, group):
+    '''
+    Chown a file, pass the file the desired user and group without following
+    symlinks.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' file.chown /etc/passwd root root
+    '''
+    uid = user_to_uid(user)
+    gid = group_to_gid(group)
+    err = ''
+    if uid == '':
+        if user:
+            err += 'User does not exist\n'
+        else:
+            uid = -1
+    if gid == '':
+        if group:
+            err += 'Group does not exist\n'
+        else:
+            gid = -1
+
+    return os.lchown(path, uid, gid)
+
+
 def chown(path, user, group):
     '''
     Chown a file, pass the file the desired user and group
@@ -1590,7 +1618,7 @@ def truncate(path, length):
     '''
     .. versionadded:: 2014.1.0 (Hydrogen)
 
-    Seek to a position on a file and write to it
+    Seek to a position on a file and delete everything after that point
 
     CLI Example:
 
@@ -1624,6 +1652,24 @@ def link(src, path):
     except (OSError, IOError):
         raise CommandExecutionError('Could not create {0!r}'.format(path))
     return False
+
+
+def is_link(path):
+    '''
+    Check if the path is a symlink
+
+    CLI Example:
+
+    .. code-block:: bash
+
+       salt '*' file.is_link /path/to/link
+    '''
+    # This function exists because os.path.islink does not support Windows,
+    # therefore a custom function will need to be called. This function
+    # therefore helps API consistency by providing a single function to call for
+    # both operating systems.
+
+    return os.path.islink(path)
 
 
 def symlink(src, path):
@@ -1849,7 +1895,7 @@ def statvfs(path):
     return False
 
 
-def stats(path, hash_type='md5', follow_symlinks=True):
+def stats(path, hash_type=None, follow_symlinks=True):
     '''
     Return a dict containing the stats for a given file
 
@@ -1883,7 +1929,8 @@ def stats(path, hash_type='md5', follow_symlinks=True):
     ret['ctime'] = pstat.st_ctime
     ret['size'] = pstat.st_size
     ret['mode'] = str(oct(stat.S_IMODE(pstat.st_mode)))
-    ret['sum'] = get_sum(path, hash_type)
+    if hash_type:
+        ret['sum'] = get_sum(path, hash_type)
     ret['type'] = 'file'
     if stat.S_ISDIR(pstat.st_mode):
         ret['type'] = 'dir'
@@ -2319,7 +2366,7 @@ def check_perms(name, ret, user, group, mode, follow_symlinks=False):
 
         salt '*' file.check_perms /etc/sudoers '{}' root root 400
 
-    .. versionchanged:: 2014.1.2
+    .. versionchanged:: 2014.1.3
         ``follow_symlinks`` option added
     '''
     if not ret:
@@ -2365,12 +2412,16 @@ def check_perms(name, ret, user, group, mode, follow_symlinks=False):
             perms['cgroup'] = group
     if 'cuser' in perms or 'cgroup' in perms:
         if not __opts__['test']:
+            if os.path.islink(name) and not follow_symlinks:
+                chown_func = lchown
+            else:
+                chown_func = chown
             if user is None:
                 user = perms['luser']
             if group is None:
                 group = perms['lgroup']
             try:
-                chown(name, user, group)
+                chown_func(name, user, group)
             except OSError:
                 ret['result'] = False
 
@@ -2495,9 +2546,7 @@ def check_file_meta(
     changes = {}
     if not source_sum:
         source_sum = dict()
-    lstats = stats(
-        name, source_sum.get('hash_type', 'md5'), follow_symlinks=False
-    )
+    lstats = stats(name, hash_type=source_sum.get('hash_type', None), follow_symlinks=False)
     if not lstats:
         changes['newfile'] = name
         return changes
@@ -2620,8 +2669,7 @@ def manage_file(name,
                 template=None,   # pylint: disable=W0613
                 show_diff=True,
                 contents=None,
-                dir_mode=None,
-                mkdirs=False):
+                dir_mode=None):
     '''
     Checks the destination against what was retrieved with get_managed and
     makes the appropriate modifications (if necessary).
@@ -2766,7 +2814,7 @@ def manage_file(name,
                     ret['result'] = False
                     return ret
             if not os.path.isdir(os.path.dirname(name)):
-                if makedirs and mkdirs:
+                if makedirs:
                     # check for existence of windows drive letter
                     if salt.utils.is_windows():
                         drive, _ = os.path.splitdrive(name)

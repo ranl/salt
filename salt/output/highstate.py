@@ -115,7 +115,9 @@ def _format_host(host, data):
                 '    {tcolor}      ID: {comps[1]}{colors[ENDC]}',
                 '    {tcolor}Function: {comps[0]}.{comps[3]}{colors[ENDC]}',
                 '    {tcolor}  Result: {ret[result]!s}{colors[ENDC]}',
-                '    {tcolor} Comment: {comment}{colors[ENDC]}'
+                '    {tcolor} Comment: {comment}{colors[ENDC]}',
+                '    {tcolor} Started: {ret[start_time]!s}{colors[ENDC]}',
+                '    {tcolor} Duration: {ret[duration]!s} ms{colors[ENDC]}'
             ]
             # This isn't the prettiest way of doing this, but it's readable.
             if comps[1] != comps[2]:
@@ -129,6 +131,8 @@ def _format_host(host, data):
                 comment = ret['comment'].join(' ').replace(
                     '\n',
                     '\n' + ' ' * 13)
+            for detail in ['start_time', 'duration']:
+                ret.setdefault(detail, '')
             svars = {
                 'tcolor': tcolor,
                 'comps': comps,

@@ -12,6 +12,8 @@ import logging
 import tempfile
 import time
 
+from collections import MutableMapping
+
 # Import salt libs
 from salt.exceptions import LoaderError
 from salt.template import check_render_pipe_str
@@ -109,7 +111,19 @@ def _create_loader(
 
 def minion_mods(opts, context=None, whitelist=None):
     '''
-    Returns the minion modules
+    Load execution modules
+
+    Returns a dictionary of execution modules appropriate for the current
+    system by evaluating the __virtual__() function in each module.
+
+    .. code-block:: python
+
+        import salt.config
+        import salt.loader
+
+        __opts__ salt.config.minion_config('/etc/salt/minion')
+        __salt__ = salt.loader.minion_mods(__opts__)
+        __salt__['test.ping']()
     '''
     load = _create_loader(opts, 'modules', 'module')
     if context is None:
@@ -131,6 +145,15 @@ def minion_mods(opts, context=None, whitelist=None):
 def raw_mod(opts, name, functions):
     '''
     Returns a single module loaded raw and bypassing the __virtual__ function
+
+    .. code-block:: python
+
+        import salt.config
+        import salt.loader
+
+        __opts__ salt.config.minion_config('/etc/salt/minion')
+        testmod = salt.loader.raw_mod(__opts__, 'test', None)
+        testmod['test.ping']()
     '''
     load = _create_loader(opts, 'modules', 'rawmodule')
     return load.gen_module(name, functions)
@@ -143,7 +166,11 @@ def proxy(opts, functions, whitelist=None):
     load = _create_loader(opts, 'proxy', 'proxy')
     pack = {'name': '__proxy__',
             'value': functions}
-    return load.gen_functions(pack, whitelist=whitelist)
+    return LazyLoader(load,
+                      functions,
+                      pack,
+                      whitelist=whitelist,
+                      )
 
 
 def returners(opts, functions, whitelist=None):
@@ -153,7 +180,11 @@ def returners(opts, functions, whitelist=None):
     load = _create_loader(opts, 'returners', 'returner')
     pack = {'name': '__salt__',
             'value': functions}
-    return load.gen_functions(pack, whitelist=whitelist)
+    return LazyLoader(load,
+                      functions,
+                      pack,
+                      whitelist=whitelist,
+                      )
 
 
 def pillars(opts, functions):
@@ -163,18 +194,18 @@ def pillars(opts, functions):
     load = _create_loader(opts, 'pillar', 'pillar')
     pack = {'name': '__salt__',
             'value': functions}
-    return load.filter_func('ext_pillar', pack)
+    return LazyFilterLoader(load, 'ext_pillar', pack=pack)
 
 
 def tops(opts):
     '''
     Returns the tops modules
     '''
-    if not 'master_tops' in opts:
+    if 'master_tops' not in opts:
         return {}
     whitelist = opts['master_tops'].keys()
     load = _create_loader(opts, 'tops', 'top')
-    return load.filter_func('top', whitelist=whitelist)
+    return LazyFilterLoader(load, 'top', whitelist=whitelist)
 
 
 def wheels(opts, whitelist=None):
@@ -182,7 +213,7 @@ def wheels(opts, whitelist=None):
     Returns the wheels modules
     '''
     load = _create_loader(opts, 'wheel', 'wheel')
-    return load.gen_functions(whitelist=whitelist)
+    return LazyLoader(load, whitelist=whitelist)
 
 
 def outputters(opts):
@@ -194,7 +225,7 @@ def outputters(opts):
         'output',
         'output',
         ext_type_dirs='outputter_dirs')
-    return load.filter_func('output')
+    return LazyFilterLoader(load, 'output')
 
 
 def auth(opts, whitelist=None):
@@ -202,7 +233,7 @@ def auth(opts, whitelist=None):
     Returns the auth modules
     '''
     load = _create_loader(opts, 'auth', 'auth')
-    return load.gen_functions(whitelist=whitelist)
+    return LazyLoader(load, whitelist=whitelist)
 
 
 def fileserver(opts, backends):
@@ -210,8 +241,7 @@ def fileserver(opts, backends):
     Returns the file server modules
     '''
     load = _create_loader(opts, 'fileserver', 'fileserver')
-    ret = load.gen_functions(whitelist=backends)
-    return ret
+    return LazyLoader(load, whitelist=backends)
 
 
 def roster(opts, whitelist=None):
@@ -219,18 +249,25 @@ def roster(opts, whitelist=None):
     Returns the roster modules
     '''
     load = _create_loader(opts, 'roster', 'roster')
-    ret = load.gen_functions(whitelist=whitelist)
-    return ret
+    return LazyLoader(load, whitelist=whitelist)
 
 
 def states(opts, functions, whitelist=None):
     '''
     Returns the state modules
+
+    .. code-block:: python
+
+        import salt.config
+        import salt.loader
+
+        __opts__ salt.config.minion_config('/etc/salt/minion')
+        statemods = salt.loader.states(__opts__, None)
     '''
     load = _create_loader(opts, 'states', 'states')
     pack = {'name': '__salt__',
             'value': functions}
-    return load.gen_functions(pack, whitelist=whitelist)
+    return LazyLoader(load, pack=pack, whitelist=whitelist)
 
 
 def search(opts, returners, whitelist=None):
@@ -240,7 +277,7 @@ def search(opts, returners, whitelist=None):
     load = _create_loader(opts, 'search', 'search')
     pack = {'name': '__ret__',
             'value': returners}
-    return load.gen_functions(pack, whitelist=whitelist)
+    return LazyLoader(load, pack=pack, whitelist=whitelist)
 
 
 def log_handlers(opts):
@@ -254,7 +291,7 @@ def log_handlers(opts):
         int_type='handlers',
         base_path=os.path.join(SALT_BASE_PATH, 'log')
     )
-    return load.filter_func('setup_handlers')
+    return LazyFilterLoader(load, 'setup_handlers')
 
 
 def ssh_wrapper(opts, functions=None):
@@ -273,7 +310,7 @@ def ssh_wrapper(opts, functions=None):
     )
     pack = {'name': '__salt__',
             'value': functions}
-    return load.gen_functions(pack)
+    return LazyLoader(load, pack=pack)
 
 
 def render(opts, functions, states=None):
@@ -284,10 +321,13 @@ def render(opts, functions, states=None):
         opts, 'renderers', 'render', ext_type_dirs='render_dirs'
     )
     pack = [{'name': '__salt__',
-            'value': functions}]
+             'value': functions},
+            {'name': '__pillar__',
+             'value': opts.get('pillar', {})}]
+
     if states:
         pack.append({'name': '__states__', 'value': states})
-    rend = load.filter_func('render', pack)
+    rend = LazyFilterLoader(load, 'render', pack=pack)
     if not check_render_pipe_str(opts['renderer'], rend):
         err = ('The renderer {0} is unavailable, this error is often because '
                'the needed software is unavailable'.format(opts['renderer']))
@@ -300,6 +340,15 @@ def grains(opts):
     '''
     Return the functions for the dynamic grains and the values for the static
     grains.
+
+    .. code-block:: python
+
+        import salt.config
+        import salt.loader
+
+        __opts__ salt.config.minion_config('/etc/salt/minion')
+        __grains__ = salt.loader.grains(__opts__)
+        print __grains__['id']
     '''
     if opts.get('skip_grains', False):
         return {}
@@ -350,7 +399,17 @@ def runner(opts):
     load = _create_loader(
         opts, 'runners', 'runner', ext_type_dirs='runner_dirs'
     )
-    return load.gen_functions()
+    return LazyLoader(load)
+
+
+def queues(opts):
+    '''
+    Directly call a function inside a loader directory
+    '''
+    load = _create_loader(
+        opts, 'queues', 'queue', ext_type_dirs='queue_dirs'
+    )
+    return LazyLoader(load)
 
 
 def clouds(opts):
@@ -508,11 +567,15 @@ class Loader(object):
             fn_ = os.path.join(mod_dir, name)
             if os.path.isdir(fn_):
                 full = fn_
+                break
             else:
                 for ext in ('.py', '.pyo', '.pyc', '.so'):
                     full_test = '{0}{1}'.format(fn_, ext)
                     if os.path.isfile(full_test):
                         full = full_test
+                        break
+                if full:
+                    break
         if not full:
             return None
 
@@ -617,7 +680,7 @@ class Loader(object):
             context = sys.modules[
                 functions[functions.keys()[0]].__module__
             ].__context__
-        except AttributeError:
+        except (AttributeError, IndexError):
             context = {}
         mod.__context__ = context
         return funcs
@@ -916,7 +979,7 @@ class Loader(object):
 
     def process_virtual(self, mod, module_name):
         '''
-        Given a loaded module and it's default name determine its virtual name
+        Given a loaded module and its default name determine its virtual name
 
         This function returns a tuple. The first value will be either True or
         False and will indicate if the module should be loaded or not (ie. if
@@ -1068,11 +1131,9 @@ class Loader(object):
         the returners for the salt minion
         '''
         funcs = {}
-        if pack:
-            gen = self.gen_functions(pack, whitelist=whitelist)
-        else:
-            gen = self.gen_functions(whitelist=whitelist)
+        gen = self.gen_functions(pack=pack, whitelist=whitelist)
         for key, fun in gen.items():
+            # if the name (after '.') is "name", then rename to mod_name: fun
             if key[key.index('.') + 1:] == name:
                 funcs[key[:key.index('.')]] = fun
         return funcs
@@ -1162,3 +1223,138 @@ class Loader(object):
                 log.error(msg.format(cfn))
             os.umask(cumask)
         return grains_data
+
+
+class LazyLoader(MutableMapping):
+    '''
+    Lazily load things modules. If anyone asks for len or attempts to iterate this
+    will load them all.
+
+    TODO: negative caching? If you ask for 'foo.bar' and it doesn't exist it will
+    look EVERY time unless someone calls load_all()
+    '''
+    def __init__(self,
+                 loader,
+                 functions=None,
+                 pack=None,
+                 whitelist=None):
+        # create a dict to store module functions in
+        self._dict = {}
+
+        self.loader = loader
+        if not functions:
+            self.functions = {}
+        else:
+            self.functions = functions
+        self.pack = pack
+        self.whitelist = whitelist
+
+        # have we already loded everything?
+        self.loaded = False
+
+    def _load(self, key):
+        '''
+        Load a single item if you have it
+        '''
+        # if the key doesn't have a '.' then it isn't valid for this mod dict
+        if '.' not in key:
+            raise KeyError
+        mod_key = key.split('.', 1)[0]
+        if self.whitelist:
+            # if the modulename isn't in the whitelist, don't bother
+            if mod_key not in self.whitelist:
+                raise KeyError
+        mod_funcs = self.loader.gen_module(mod_key,
+                                           self.functions,
+                                           pack=self.pack,
+                                           )
+        # if you loaded nothing, then we don't have it
+        if mod_funcs is None:
+            # if we couldn't find it, then it could be a virtual or we don't have it
+            # until we have a better way, we have to load them all to know
+            # TODO: maybe do a load until, with some glob match first?
+            self.load_all()
+            return self._dict[key]
+        self._dict.update(mod_funcs)
+
+    def load_all(self):
+        '''
+        Load all of them
+        '''
+        self._dict.update(self.loader.gen_functions(pack=self.pack,
+                                                    whitelist=self.whitelist))
+        self.loaded = True
+
+    def __setitem__(self, key, val):
+        self._dict[key] = val
+
+    def __delitem__(self, key):
+        del self._dict[key]
+
+    def __getitem__(self, key):
+        '''
+        Check if the key is ttld out, then do the get
+        '''
+        if key not in self._dict and not self.loaded:
+            # load the item
+            self._load(key)
+        return self._dict[key]
+
+    def __len__(self):
+        # if not loaded,
+        if not self.loaded:
+            self.load_all()
+        return len(self._dict)
+
+    def __iter__(self):
+        if not self.loaded:
+            self.load_all()
+        return iter(self._dict)
+
+
+class LazyFilterLoader(LazyLoader):
+    '''
+    Subclass of LazyLoader which filters the module names (for things such as ext_pillar)
+    which have all modules with a single function that we care about
+    '''
+    def __init__(self,
+                 loader,
+                 name,
+                 functions=None,
+                 pack=None,
+                 whitelist=None):
+        self.name = name
+        LazyLoader.__init__(self,
+                            loader,
+                            functions=functions,
+                            pack=pack,
+                            whitelist=whitelist)
+
+    def _load(self, key):
+        if self.whitelist:
+            # if the modulename isn't in the whitelist, don't bother
+            if key not in self.whitelist:
+                raise KeyError
+        mod_funcs = self.loader.gen_module(key,
+                                           self.functions,
+                                           pack=self.pack,
+                                           )
+        # if you loaded nothing, then we don't have it
+        if mod_funcs is None:
+            # if we couldn't find it, then it could be a virtual or we don't have it
+            # until we have a better way, we have to load them all to know
+            # TODO: maybe do a load until, with some glob match first?
+            self.load_all()
+            return self._dict[key]
+
+        # if we got one, now lets check if we have the function name we want
+        for mod_key, mod_fun in mod_funcs.iteritems():
+            # if the name (after '.') is "name", then rename to mod_name: fun
+            if mod_key[mod_key.index('.') + 1:] == self.name:
+                self._dict[mod_key[:mod_key.index('.')]] = mod_fun
+
+    def load_all(self):
+        filtered_funcs = self.loader.filter_func(self.name,
+                                                 pack=self.pack,
+                                                 whitelist=self.whitelist)
+        self._dict.update(filtered_funcs)

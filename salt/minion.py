@@ -679,6 +679,9 @@ class Minion(MinionBase):
                 # We can't decode the master's response to our event,
                 # so we will need to re-authenticate.
                 self.authenticate()
+        except SaltReqTimeoutError:
+            log.info("Master failed to respond. Preforming re-authenticating")
+            self.authenticate()
         except Exception:
             log.info("fire_master failed: {0}".format(traceback.format_exc()))
 
@@ -1181,8 +1184,11 @@ class Minion(MinionBase):
         acceptance_wait_time_max = self.opts['acceptance_wait_time_max']
         if not acceptance_wait_time_max:
             acceptance_wait_time_max = acceptance_wait_time
+
+        tries = self.opts.get('auth_tries', 1)
+        safe = self.opts.get('auth_safemode', safe)
         while True:
-            creds = auth.sign_in(timeout, safe)
+            creds = auth.sign_in(timeout, safe, tries)
             if creds != 'retry':
                 log.info('Authentication with master successful!')
                 break
@@ -1193,6 +1199,7 @@ class Minion(MinionBase):
             if acceptance_wait_time < acceptance_wait_time_max:
                 acceptance_wait_time += acceptance_wait_time
                 log.debug('Authentication wait time is {0}'.format(acceptance_wait_time))
+
         self.aes = creds['aes']
         if self.opts.get('syndic_master_publish_port'):
             self.publish_port = self.opts.get('syndic_master_publish_port')
@@ -1340,10 +1347,21 @@ class Minion(MinionBase):
                     exc)
             )
 
+        ping_interval = self.opts.get('ping_interval', 0) * 60
+        ping_at = None
         while self._running is True:
             loop_interval = self.process_schedule(self, loop_interval)
             try:
                 socks = self._do_poll(loop_interval)
+
+                if ping_interval > 0:
+                    if socks or not ping_at:
+                        ping_at = time.time() + ping_interval
+                    if ping_at < time.time():
+                        log.debug('Ping master')
+                        self._fire_master('ping', 'minion_ping')
+                        ping_at = time.time() + ping_interval
+
                 self._do_socket_recv(socks)
 
                 # Check the event system
@@ -1382,6 +1400,8 @@ class Minion(MinionBase):
                     log.critical('Unexpected ZMQError while polling minion',
                                  exc_info=True)
                 continue
+            except SaltClientError:
+                raise
             except Exception:
                 log.critical(
                     'An exception occurred while polling the minion',
@@ -1408,6 +1428,11 @@ class Minion(MinionBase):
         self._fire_master_minion_start()
 
         loop_interval = int(self.opts['loop_interval'])
+
+        # On first startup execute a state run if configured to do so
+        self._state_run()
+        time.sleep(.5)
+
         while self._running is True:
             try:
                 socks = self._do_poll(loop_interval)
@@ -1475,6 +1500,7 @@ class Syndic(Minion):
         self._syndic = True
         opts['loop_interval'] = 1
         super(Syndic, self).__init__(opts)
+        self.mminion = salt.minion.MasterMinion(opts)
 
     def _handle_aes(self, load, sig=None):
         '''
@@ -1652,7 +1678,7 @@ class Syndic(Minion):
                 if e.errno == errno.EAGAIN or e.errno == errno.EINTR:
                     break
                 raise
-            log.trace('Got event %s', event['tag'])
+            log.trace('Got event {0}'.format(event['tag']))
             if self.event_forward_timeout is None:
                 self.event_forward_timeout = (
                         time.time() + self.opts['syndic_event_forward_timeout']
@@ -1665,10 +1691,11 @@ class Syndic(Minion):
                 if not jdict:
                     jdict['__fun__'] = event['data'].get('fun')
                     jdict['__jid__'] = event['data']['jid']
-                    jdict['__load__'] = salt.utils.jid_load(
-                        event['data']['jid'],
-                        self.local.opts['cachedir'],
-                        self.opts['hash_type'])
+                    jdict['__load__'] = {}
+                    fstr = '{0}.get_jid'.format(self.opts['master_job_cache'])
+                    jdict['__load__'].update(
+                        self.mminion.returners[fstr](event['data']['jid'])
+                        )
                 jdict[event['data']['id']] = event['data']['return']
             else:
                 # Add generic event aggregation here
@@ -1916,7 +1943,7 @@ class Matcher(object):
                 results.append(str(self.glob_match(match)))
         results = ' '.join(results)
         try:
-            return eval(results)
+            return eval(results)  # pylint: disable=W0123
         except Exception:
             log.error('Invalid compound target: {0} for results: {1}'.format(tgt, results))
             return False
