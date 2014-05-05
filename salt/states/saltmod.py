@@ -60,7 +60,8 @@ def state(
         fail_minions=None,
         allow_fail=0,
         concurrent=False,
-        timeout=None):
+        timeout=None,
+        allow_noreturn=False):
     '''
     Invoke a state run on a given target
 
